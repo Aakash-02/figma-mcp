@@ -1,6 +1,6 @@
 {
   "name": "figma-asset-downloader-mcp",
-  "version": "3.0.0",
+  "version": "4.0.0",
   "description": "MCP server for bulk asset downloads and design token extraction from Figma files. Complements official Figma MCP.",
   "type": "module",
   "main": "index.js",

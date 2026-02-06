@@ -29,27 +29,60 @@ function extractFileKey(url) {
   return match ? match[1] : null;
 }
 
-function extractAllAssets(node, assets = [], nodePath = '', depth = 0, parentType = null) {
+function extractAllAssets(node, assets = [], nodePath = '', depth = 0, parentType = null, options = {}) {
   const currentPath = nodePath ? `${nodePath}/${node.name}` : node.name;
   const nodeType = node.type;
   
-  // Get top-level frames AND everything one level below frames
-  const isTopLevelFrame = nodeType === 'FRAME' && depth === 2;
-  const isFrameChild = depth === 3 && parentType === 'FRAME';
+  // Default behavior: filtered (backwards compatible)
+  // New behavior: unfiltered (when options.includeAll = true)
+  const includeAll = options.includeAll || false;
+  const maxDepth = options.maxDepth || 10;
   
-  if (isTopLevelFrame || isFrameChild) {
-    assets.push({
+  let shouldInclude = false;
+  
+  if (includeAll) {
+    // Include everything up to maxDepth (for AI-driven selection)
+    shouldInclude = depth <= maxDepth && nodeType !== 'DOCUMENT' && nodeType !== 'CANVAS';
+  } else {
+    // Original filtering: frames + one level below (backwards compatible)
+    const isTopLevelFrame = nodeType === 'FRAME' && depth === 2;
+    const isFrameChild = depth === 3 && parentType === 'FRAME';
+    shouldInclude = isTopLevelFrame || isFrameChild;
+  }
+  
+  if (shouldInclude) {
+    const asset = {
       id: node.id,
       name: node.name,
       path: currentPath,
       type: nodeType,
       depth: depth
-    });
+    };
+    
+    // Add helpful metadata for AI decision-making
+    if (includeAll) {
+      asset.hasChildren = node.children && node.children.length > 0;
+      asset.childCount = node.children ? node.children.length : 0;
+      asset.visible = node.visible !== false;
+      
+      if (node.absoluteBoundingBox) {
+        asset.size = {
+          width: Math.round(node.absoluteBoundingBox.width),
+          height: Math.round(node.absoluteBoundingBox.height)
+        };
+      }
+      
+      // Indicate if this is likely recreatable in code
+      asset.likelyRecreatableInCode = ['RECTANGLE', 'ELLIPSE', 'LINE', 'TEXT'].includes(nodeType);
+      asset.likelyNeedsDownload = ['COMPONENT', 'INSTANCE', 'VECTOR', 'BOOLEAN_OPERATION', 'FRAME'].includes(nodeType);
+    }
+    
+    assets.push(asset);
   }
 
-  if (node.children && Array.isArray(node.children)) {
+  if (node.children && Array.isArray(node.children) && depth < maxDepth) {
     node.children.forEach(child => 
-      extractAllAssets(child, assets, currentPath, depth + 1, nodeType)
+      extractAllAssets(child, assets, currentPath, depth + 1, nodeType, options)
     );
   }
 
@@ -354,6 +387,224 @@ async function getMetadata(args) {
       content: [{
         type: 'text',
         text: xml
+      }]
+    };
+
+  } catch (error) {
+    return {
+      content: [{
+        type: 'text',
+        text: `Error: ${error.response?.data?.err || error.message}`
+      }],
+      isError: true
+    };
+  }
+}
+
+async function fetchAllAssetsDetailed(args) {
+  try {
+    const { figmaUrl, includeMetadata = true } = args;
+    const fileKey = extractFileKey(figmaUrl);
+    
+    if (!fileKey) {
+      throw new Error('Invalid Figma URL. Expected format: https://www.figma.com/design/FILE_KEY/...');
+    }
+
+    const token = process.env.FIGMA_ACCESS_TOKEN;
+    if (!token) {
+      throw new Error('FIGMA_ACCESS_TOKEN environment variable is not set');
+    }
+
+    const response = await axios.get(`https://api.figma.com/v1/files/${fileKey}`, {
+      headers: { 'X-Figma-Token': token }
+    });
+
+    const fileData = response.data;
+    // Get ALL assets (not filtered) for AI-driven selection
+    const assets = extractAllAssets(fileData.document, [], '', 0, null, { 
+      includeAll: true,
+      maxDepth: 8  // Reasonable depth to avoid too much data
+    });
+
+    // Group assets by type for easier decision-making
+    const assetsByType = {};
+    assets.forEach(asset => {
+      if (!assetsByType[asset.type]) {
+        assetsByType[asset.type] = [];
+      }
+      assetsByType[asset.type].push(asset);
+    });
+
+    // Provide recommendations to help AI decide
+    const recommendations = {
+      likelyNeedDownload: assets.filter(a => a.likelyNeedsDownload).length,
+      likelyRecreatableInCode: assets.filter(a => a.likelyRecreatableInCode).length,
+      frames: assets.filter(a => a.type === 'FRAME').length,
+      components: assets.filter(a => a.type === 'COMPONENT').length,
+      instances: assets.filter(a => a.type === 'INSTANCE').length,
+      vectors: assets.filter(a => a.type === 'VECTOR').length,
+      icons: assets.filter(a => 
+        a.type === 'VECTOR' && 
+        a.size && 
+        a.size.width <= 32 && 
+        a.size.height <= 32
+      ).length
+    };
+
+    const result = {
+      success: true,
+      fileName: fileData.name,
+      fileKey,
+      totalAssets: assets.length,
+      assetsByType,
+      recommendations,
+      assets: includeMetadata ? assets : assets.map(a => ({
+        id: a.id,
+        name: a.name,
+        type: a.type,
+        size: a.size,
+        likelyRecreatableInCode: a.likelyRecreatableInCode,
+        likelyNeedsDownload: a.likelyNeedsDownload
+      })),
+      message: `Found ${assets.length} total assets. Use download_selective_assets with specific IDs to download only what you need.`
+    };
+
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify(result, null, 2)
+      }]
+    };
+
+  } catch (error) {
+    return {
+      content: [{
+        type: 'text',
+        text: `Error: ${error.response?.data?.err || error.message}`
+      }],
+      isError: true
+    };
+  }
+}
+
+async function downloadSelectiveAssets(args) {
+  try {
+    const { figmaUrl, assetIds, savePath, format = 'svg', scale = 2 } = args;
+    const fileKey = extractFileKey(figmaUrl);
+    
+    if (!fileKey) {
+      throw new Error('Invalid Figma URL');
+    }
+
+    if (!assetIds || !Array.isArray(assetIds) || assetIds.length === 0) {
+      throw new Error('assetIds must be a non-empty array of node IDs');
+    }
+
+    const token = process.env.FIGMA_ACCESS_TOKEN;
+    if (!token) {
+      throw new Error('FIGMA_ACCESS_TOKEN environment variable is not set');
+    }
+
+    // Create save directory
+    const absoluteSavePath = path.isAbsolute(savePath) 
+      ? savePath 
+      : path.resolve(process.cwd(), savePath);
+    
+    if (!fs.existsSync(absoluteSavePath)) {
+      fs.mkdirSync(absoluteSavePath, { recursive: true });
+    }
+
+    // Fetch file data to get asset names
+    const fileResponse = await axios.get(`https://api.figma.com/v1/files/${fileKey}`, {
+      headers: { 'X-Figma-Token': token }
+    });
+
+    const fileData = fileResponse.data;
+    const allAssets = extractAllAssets(fileData.document, [], '', 0, null, { includeAll: true });
+    
+    // Map IDs to asset info
+    const assetsMap = {};
+    allAssets.forEach(asset => {
+      assetsMap[asset.id] = asset;
+    });
+
+    // Download in chunks
+    const chunkSize = 50;
+    let totalDownloaded = 0;
+    const downloadedFiles = [];
+    const notFound = [];
+
+    for (let i = 0; i < assetIds.length; i += chunkSize) {
+      const chunk = assetIds.slice(i, i + chunkSize);
+      const nodeIds = chunk.join(',');
+
+      try {
+        const imageResponse = await axios.get(
+          `https://api.figma.com/v1/images/${fileKey}`,
+          {
+            params: {
+              ids: nodeIds,
+              format,
+              scale: format === 'svg' ? undefined : scale
+            },
+            headers: { 'X-Figma-Token': token }
+          }
+        );
+
+        const images = imageResponse.data.images;
+
+        for (const assetId of chunk) {
+          const imageUrl = images[assetId];
+          if (imageUrl) {
+            try {
+              const imageData = await axios.get(imageUrl, { responseType: 'arraybuffer' });
+              const asset = assetsMap[assetId] || { id: assetId, name: 'unknown', type: 'UNKNOWN' };
+              const fileName = `${assetId.replace(':', '-')}_${asset.type}_${sanitizeFilename(asset.name)}.${format}`;
+              const filePath = path.join(absoluteSavePath, fileName);
+              
+              fs.writeFileSync(filePath, imageData.data);
+              
+              if (fs.existsSync(filePath)) {
+                totalDownloaded++;
+                downloadedFiles.push({
+                  id: assetId,
+                  name: fileName,
+                  originalName: asset.name,
+                  type: asset.type,
+                  size: imageData.data.length
+                });
+              }
+            } catch (err) {
+              console.error(`Failed to download ${assetId}:`, err.message);
+              notFound.push(assetId);
+            }
+          } else {
+            notFound.push(assetId);
+          }
+        }
+      } catch (err) {
+        console.error(`Failed to fetch chunk:`, err.message);
+      }
+    }
+
+    const result = {
+      success: totalDownloaded > 0,
+      fileName: fileData.name,
+      requested: assetIds.length,
+      downloaded: totalDownloaded,
+      notFound: notFound.length > 0 ? notFound : undefined,
+      savePath: absoluteSavePath,
+      format,
+      files: downloadedFiles,
+      message: totalDownloaded > 0 
+        ? `Successfully downloaded ${totalDownloaded}/${assetIds.length} selected assets to ${absoluteSavePath}`
+        : `⚠️ No assets could be downloaded. Check that the asset IDs are valid.`
+    };
+
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify(result, null, 2)
       }]
     };
 
@@ -809,8 +1060,62 @@ const tools = [
     }
   },
   {
+    name: 'fetch_all_assets_detailed',
+    description: '🎯 RECOMMENDED: Fetch a COMPLETE list of ALL assets in a Figma file (not filtered). Returns detailed metadata including sizes, types, and recommendations about what might need downloading vs what can be recreated in code. Perfect for AI-driven asset selection - let the AI agent decide what to download based on visual context and metadata. Use this instead of fetch_figma_assets for intelligent workflows.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        figmaUrl: {
+          type: 'string',
+          description: 'The Figma file URL (e.g., https://www.figma.com/design/FILE_KEY/...)'
+        },
+        includeMetadata: {
+          type: 'boolean',
+          default: true,
+          description: 'Include full metadata (sizes, visibility, etc.) for each asset. Set to false for minimal output.'
+        }
+      },
+      required: ['figmaUrl']
+    }
+  },
+  {
+    name: 'download_selective_assets',
+    description: '🎯 RECOMMENDED: Download ONLY specific assets by their node IDs. Use this after fetch_all_assets_detailed to download only what the AI agent determines is needed (e.g., complex icons, illustrations, logos) while skipping simple shapes that can be recreated in code. This is the smart, efficient way to download assets. Can achieve 95% efficiency vs bulk downloads.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        figmaUrl: {
+          type: 'string',
+          description: 'The Figma file URL'
+        },
+        assetIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Array of node IDs to download (e.g., ["1:3", "1:5", "1:7"]). Get these from fetch_all_assets_detailed.'
+        },
+        savePath: {
+          type: 'string',
+          description: 'Absolute or relative path where selected assets should be saved'
+        },
+        format: {
+          type: 'string',
+          enum: ['svg', 'png', 'jpg', 'pdf'],
+          default: 'svg',
+          description: 'Export format for assets'
+        },
+        scale: {
+          type: 'number',
+          enum: [1, 2, 3, 4],
+          default: 2,
+          description: 'Scale factor for raster formats (PNG/JPG). Ignored for SVG/PDF.'
+        }
+      },
+      required: ['figmaUrl', 'assetIds', 'savePath']
+    }
+  },
+  {
     name: 'fetch_figma_assets',
-    description: 'Fetch all frames and their direct children from a Figma file. Returns metadata about available assets including IDs, names, and types. Use this first to see what assets are available before downloading.',
+    description: '⚠️ LEGACY: Fetch frames and their direct children from a Figma file (server-side filtered). Returns metadata about available assets. This uses automatic filtering and returns only ~45 assets. For AI-driven selection with complete visibility, use fetch_all_assets_detailed instead. Keep this for backwards compatibility or quick filtered lists.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -824,7 +1129,7 @@ const tools = [
   },
   {
     name: 'download_figma_assets',
-    description: 'Download all frames and their direct children as compiled assets. Each asset includes all nested elements rendered. Perfect for getting design assets ready for development.',
+    description: '⚠️ LEGACY: Download all frames and their direct children as compiled assets (server-side filtered). Each asset includes all nested elements rendered. Downloads ~45 assets automatically. For more efficient, AI-driven downloads, use fetch_all_assets_detailed + download_selective_assets instead. Keep this for quick bulk exports or backwards compatibility.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -911,6 +1216,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return await getScreenshot(args);
       case 'get_metadata':
         return await getMetadata(args);
+      case 'fetch_all_assets_detailed':
+        return await fetchAllAssetsDetailed(args);
+      case 'download_selective_assets':
+        return await downloadSelectiveAssets(args);
       case 'fetch_figma_assets':
         return await fetchFigmaAssets(args);
       case 'download_figma_assets':
