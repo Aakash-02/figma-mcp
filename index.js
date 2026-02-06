@@ -5,10 +5,17 @@
  * 
  * Downloads frames and their direct children from Figma files as compiled SVG assets.
  * Perfect for getting design assets ready for development.
+ * 
+ * Supports two transport modes:
+ *   - Stdio (default): For local usage via `node index.js`
+ *   - HTTP  (cloud):   For cloud deployment via `node index.js --http`
+ *     Uses Streamable HTTP transport (MCP spec) with Express.
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -17,6 +24,7 @@ import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
 import { config } from 'dotenv';
+import { randomUUID } from 'node:crypto';
 
 config();
 
@@ -1010,18 +1018,6 @@ async function downloadComponentLibrary(args) {
 // MCP Server Setup
 // ============================================================================
 
-const server = new Server(
-  {
-    name: 'figma-asset-downloader',
-    version: '2.0.0',
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  }
-);
-
 const tools = [
   {
     name: 'get_screenshot',
@@ -1203,56 +1199,220 @@ const tools = [
   }
 ];
 
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return { tools };
-});
-
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-
-  try {
-    switch (name) {
-      case 'get_screenshot':
-        return await getScreenshot(args);
-      case 'get_metadata':
-        return await getMetadata(args);
-      case 'fetch_all_assets_detailed':
-        return await fetchAllAssetsDetailed(args);
-      case 'download_selective_assets':
-        return await downloadSelectiveAssets(args);
-      case 'fetch_figma_assets':
-        return await fetchFigmaAssets(args);
-      case 'download_figma_assets':
-        return await downloadFigmaAssets(args);
-      case 'get_design_tokens':
-        return await getDesignTokens(args);
-      case 'download_component_library':
-        return await downloadComponentLibrary(args);
-      default:
-        throw new Error(`Unknown tool: ${name}`);
+/**
+ * Creates and configures a new MCP Server instance with all tools registered.
+ * Each HTTP session gets its own server instance.
+ */
+function createServer() {
+  const server = new Server(
+    {
+      name: 'figma-asset-downloader',
+      version: '4.0.0',
+    },
+    {
+      capabilities: {
+        tools: {},
+      },
     }
-  } catch (error) {
-    return {
-      content: [{
-        type: 'text',
-        text: `Error: ${error.message}`
-      }],
-      isError: true
-    };
-  }
-});
+  );
 
-// ============================================================================
-// Start Server
-// ============================================================================
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    return { tools };
+  });
 
-async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error('Figma Asset Downloader MCP Server running on stdio');
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+
+    try {
+      switch (name) {
+        case 'get_screenshot':
+          return await getScreenshot(args);
+        case 'get_metadata':
+          return await getMetadata(args);
+        case 'fetch_all_assets_detailed':
+          return await fetchAllAssetsDetailed(args);
+        case 'download_selective_assets':
+          return await downloadSelectiveAssets(args);
+        case 'fetch_figma_assets':
+          return await fetchFigmaAssets(args);
+        case 'download_figma_assets':
+          return await downloadFigmaAssets(args);
+        case 'get_design_tokens':
+          return await getDesignTokens(args);
+        case 'download_component_library':
+          return await downloadComponentLibrary(args);
+        default:
+          throw new Error(`Unknown tool: ${name}`);
+      }
+    } catch (error) {
+      return {
+        content: [{
+          type: 'text',
+          text: `Error: ${error.message}`
+        }],
+        isError: true
+      };
+    }
+  });
+
+  return server;
 }
 
-main().catch((error) => {
-  console.error('Fatal error:', error);
-  process.exit(1);
-});
+// ============================================================================
+// Start Server — Stdio or HTTP mode
+// ============================================================================
+
+const useHttp = process.argv.includes('--http');
+
+if (useHttp) {
+  // --------------------------------------------------------------------------
+  // HTTP mode — Streamable HTTP transport for cloud deployment
+  // --------------------------------------------------------------------------
+  const express = (await import('express')).default;
+
+  const app = express();
+  app.use(express.json());
+
+  // Map to store transports by session ID
+  const transports = {};
+
+  // Health-check endpoint (useful for cloud load balancers / uptime monitors)
+  app.get('/health', (_req, res) => {
+    res.json({ status: 'ok', server: 'figma-asset-downloader', version: '4.0.0' });
+  });
+
+  // ---- MCP POST handler ----
+  app.post('/mcp', async (req, res) => {
+    const sessionId = req.headers['mcp-session-id'];
+
+    try {
+      let transport;
+
+      if (sessionId && transports[sessionId]) {
+        // Reuse existing transport for this session
+        transport = transports[sessionId];
+      } else if (!sessionId && isInitializeRequest(req.body)) {
+        // New initialization request — create transport + server
+        transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          onsessioninitialized: (newSessionId) => {
+            console.log(`Session initialized: ${newSessionId}`);
+            transports[newSessionId] = transport;
+          }
+        });
+
+        transport.onclose = () => {
+          const sid = transport.sessionId;
+          if (sid && transports[sid]) {
+            console.log(`Transport closed for session ${sid}`);
+            delete transports[sid];
+          }
+        };
+
+        const server = createServer();
+        await server.connect(transport);
+        await transport.handleRequest(req, res, req.body);
+        return;
+      } else {
+        // No valid session
+        res.status(400).json({
+          jsonrpc: '2.0',
+          error: { code: -32000, message: 'Bad Request: No valid session ID provided' },
+          id: null
+        });
+        return;
+      }
+
+      await transport.handleRequest(req, res, req.body);
+    } catch (error) {
+      console.error('Error handling MCP POST:', error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          jsonrpc: '2.0',
+          error: { code: -32603, message: 'Internal server error' },
+          id: null
+        });
+      }
+    }
+  });
+
+  // ---- MCP GET handler (SSE stream) ----
+  app.get('/mcp', async (req, res) => {
+    const sessionId = req.headers['mcp-session-id'];
+    if (!sessionId || !transports[sessionId]) {
+      res.status(400).send('Invalid or missing session ID');
+      return;
+    }
+    const transport = transports[sessionId];
+    await transport.handleRequest(req, res);
+  });
+
+  // ---- MCP DELETE handler (session termination) ----
+  app.delete('/mcp', async (req, res) => {
+    const sessionId = req.headers['mcp-session-id'];
+    if (!sessionId || !transports[sessionId]) {
+      res.status(400).send('Invalid or missing session ID');
+      return;
+    }
+    try {
+      const transport = transports[sessionId];
+      await transport.handleRequest(req, res);
+    } catch (error) {
+      console.error('Error handling session termination:', error);
+      if (!res.headersSent) {
+        res.status(500).send('Error processing session termination');
+      }
+    }
+  });
+
+  // Start listening
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`Figma MCP Server (HTTP) listening on port ${PORT}`);
+    console.log(`  MCP endpoint: http://localhost:${PORT}/mcp`);
+    console.log(`  Health check: http://localhost:${PORT}/health`);
+  });
+
+  // Graceful shutdown
+  process.on('SIGINT', async () => {
+    console.log('Shutting down...');
+    for (const sessionId in transports) {
+      try {
+        await transports[sessionId].close();
+        delete transports[sessionId];
+      } catch (error) {
+        console.error(`Error closing session ${sessionId}:`, error);
+      }
+    }
+    process.exit(0);
+  });
+
+  process.on('SIGTERM', async () => {
+    console.log('SIGTERM received, shutting down...');
+    for (const sessionId in transports) {
+      try {
+        await transports[sessionId].close();
+        delete transports[sessionId];
+      } catch (error) {
+        console.error(`Error closing session ${sessionId}:`, error);
+      }
+    }
+    process.exit(0);
+  });
+
+} else {
+  // --------------------------------------------------------------------------
+  // Stdio mode — original local transport (backwards compatible)
+  // --------------------------------------------------------------------------
+  async function main() {
+    const server = createServer();
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    console.error('Figma Asset Downloader MCP Server running on stdio');
+  }
+
+  main().catch((error) => {
+    console.error('Fatal error:', error);
+    process.exit(1);
+  });
+}

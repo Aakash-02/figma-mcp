@@ -1,14 +1,16 @@
 {
   "name": "figma-asset-downloader-mcp",
   "version": "4.0.0",
-  "description": "MCP server for bulk asset downloads and design token extraction from Figma files. Complements official Figma MCP.",
+  "description": "MCP server for bulk asset downloads and design token extraction from Figma files. Supports stdio (local) and HTTP (cloud) transports.",
   "type": "module",
   "main": "index.js",
   "bin": {
     "figma-asset-downloader": "./index.js"
   },
   "scripts": {
-    "start": "node index.js",
+    "start": "node index.js --http",
+    "start:stdio": "node index.js",
+    "start:http": "node index.js --http",
     "test": "node test.js"
   },
   "keywords": [
@@ -26,9 +28,10 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^0.5.0",
+    "@modelcontextprotocol/sdk": "^1.26.0",
     "axios": "^1.6.0",
-    "dotenv": "^16.3.1"
+    "dotenv": "^16.3.1",
+    "express": "^5.2.1"
   },
   "engines": {
     "node": ">=18.0.0"

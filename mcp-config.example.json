@@ -1,8 +1,14 @@
 {
   "mcpServers": {
-    "figma-asset-downloader": {
+    "figma-asset-downloader-local": {
       "command": "node",
       "args": ["/absolute/path/to/figma/index.js"],
+      "env": {
+        "FIGMA_ACCESS_TOKEN": "your_figma_token_here"
+      }
+    },
+    "figma-asset-downloader-cloud": {
+      "url": "https://your-cloud-url.example.com/mcp",
       "env": {
         "FIGMA_ACCESS_TOKEN": "your_figma_token_here"
       }
