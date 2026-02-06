@@ -234,7 +234,21 @@ function extractComponents(node, components = []) {
 // Tool Implementations
 // ============================================================================
 
-async function getScreenshot(args) {
+/**
+ * Resolves the Figma API token.
+ * Priority: per-request token (from client header via authInfo) > env var.
+ */
+function getFigmaToken(extra) {
+  const token = extra?.authInfo?.token || process.env.FIGMA_ACCESS_TOKEN;
+  if (!token) {
+    throw new Error(
+      'FIGMA_ACCESS_TOKEN not provided. Either pass it via the x-figma-token header (cloud mode) or set the FIGMA_ACCESS_TOKEN environment variable.'
+    );
+  }
+  return token;
+}
+
+async function getScreenshot(args, extra) {
   try {
     const { figmaUrl, nodeId } = args;
     const fileKey = extractFileKey(figmaUrl);
@@ -243,10 +257,7 @@ async function getScreenshot(args) {
       throw new Error('Invalid Figma URL. Expected format: https://www.figma.com/design/FILE_KEY/...');
     }
 
-    const token = process.env.FIGMA_ACCESS_TOKEN;
-    if (!token) {
-      throw new Error('FIGMA_ACCESS_TOKEN environment variable is not set');
-    }
+    const token = getFigmaToken(extra);
 
     // If nodeId is not provided, get the first frame from the document
     let targetNodeId = nodeId;
@@ -310,7 +321,7 @@ async function getScreenshot(args) {
   }
 }
 
-async function getMetadata(args) {
+async function getMetadata(args, extra) {
   try {
     const { figmaUrl, nodeId } = args;
     const fileKey = extractFileKey(figmaUrl);
@@ -319,10 +330,7 @@ async function getMetadata(args) {
       throw new Error('Invalid Figma URL. Expected format: https://www.figma.com/design/FILE_KEY/...');
     }
 
-    const token = process.env.FIGMA_ACCESS_TOKEN;
-    if (!token) {
-      throw new Error('FIGMA_ACCESS_TOKEN environment variable is not set');
-    }
+    const token = getFigmaToken(extra);
 
     const response = await axios.get(`https://api.figma.com/v1/files/${fileKey}`, {
       headers: { 'X-Figma-Token': token }
@@ -409,7 +417,7 @@ async function getMetadata(args) {
   }
 }
 
-async function fetchAllAssetsDetailed(args) {
+async function fetchAllAssetsDetailed(args, extra) {
   try {
     const { figmaUrl, includeMetadata = true } = args;
     const fileKey = extractFileKey(figmaUrl);
@@ -418,10 +426,7 @@ async function fetchAllAssetsDetailed(args) {
       throw new Error('Invalid Figma URL. Expected format: https://www.figma.com/design/FILE_KEY/...');
     }
 
-    const token = process.env.FIGMA_ACCESS_TOKEN;
-    if (!token) {
-      throw new Error('FIGMA_ACCESS_TOKEN environment variable is not set');
-    }
+    const token = getFigmaToken(extra);
 
     const response = await axios.get(`https://api.figma.com/v1/files/${fileKey}`, {
       headers: { 'X-Figma-Token': token }
@@ -495,7 +500,7 @@ async function fetchAllAssetsDetailed(args) {
   }
 }
 
-async function downloadSelectiveAssets(args) {
+async function downloadSelectiveAssets(args, extra) {
   try {
     const { figmaUrl, assetIds, savePath, format = 'svg', scale = 2 } = args;
     const fileKey = extractFileKey(figmaUrl);
@@ -508,10 +513,7 @@ async function downloadSelectiveAssets(args) {
       throw new Error('assetIds must be a non-empty array of node IDs');
     }
 
-    const token = process.env.FIGMA_ACCESS_TOKEN;
-    if (!token) {
-      throw new Error('FIGMA_ACCESS_TOKEN environment variable is not set');
-    }
+    const token = getFigmaToken(extra);
 
     // Create save directory
     const absoluteSavePath = path.isAbsolute(savePath) 
@@ -627,7 +629,7 @@ async function downloadSelectiveAssets(args) {
   }
 }
 
-async function fetchFigmaAssets(args) {
+async function fetchFigmaAssets(args, extra) {
   try {
     const { figmaUrl } = args;
     const fileKey = extractFileKey(figmaUrl);
@@ -636,10 +638,7 @@ async function fetchFigmaAssets(args) {
       throw new Error('Invalid Figma URL. Expected format: https://www.figma.com/design/FILE_KEY/...');
     }
 
-    const token = process.env.FIGMA_ACCESS_TOKEN;
-    if (!token) {
-      throw new Error('FIGMA_ACCESS_TOKEN environment variable is not set');
-    }
+    const token = getFigmaToken(extra);
 
     const response = await axios.get(`https://api.figma.com/v1/files/${fileKey}`, {
       headers: { 'X-Figma-Token': token }
@@ -683,7 +682,7 @@ async function fetchFigmaAssets(args) {
   }
 }
 
-async function downloadFigmaAssets(args) {
+async function downloadFigmaAssets(args, extra) {
   try {
     const { figmaUrl, savePath, format = 'svg', scale = 2 } = args;
     const fileKey = extractFileKey(figmaUrl);
@@ -692,10 +691,7 @@ async function downloadFigmaAssets(args) {
       throw new Error('Invalid Figma URL');
     }
 
-    const token = process.env.FIGMA_ACCESS_TOKEN;
-    if (!token) {
-      throw new Error('FIGMA_ACCESS_TOKEN environment variable is not set');
-    }
+    const token = getFigmaToken(extra);
 
     // Fetch file data
     const fileResponse = await axios.get(`https://api.figma.com/v1/files/${fileKey}`, {
@@ -815,7 +811,7 @@ async function downloadFigmaAssets(args) {
   }
 }
 
-async function getDesignTokens(args) {
+async function getDesignTokens(args, extra) {
   try {
     const { figmaUrl } = args;
     const fileKey = extractFileKey(figmaUrl);
@@ -824,10 +820,7 @@ async function getDesignTokens(args) {
       throw new Error('Invalid Figma URL');
     }
 
-    const token = process.env.FIGMA_ACCESS_TOKEN;
-    if (!token) {
-      throw new Error('FIGMA_ACCESS_TOKEN environment variable is not set');
-    }
+    const token = getFigmaToken(extra);
 
     // Fetch file data
     const fileResponse = await axios.get(`https://api.figma.com/v1/files/${fileKey}`, {
@@ -883,7 +876,7 @@ async function getDesignTokens(args) {
   }
 }
 
-async function downloadComponentLibrary(args) {
+async function downloadComponentLibrary(args, extra) {
   try {
     const { figmaUrl, savePath, format = 'svg', scale = 2 } = args;
     const fileKey = extractFileKey(figmaUrl);
@@ -892,10 +885,7 @@ async function downloadComponentLibrary(args) {
       throw new Error('Invalid Figma URL');
     }
 
-    const token = process.env.FIGMA_ACCESS_TOKEN;
-    if (!token) {
-      throw new Error('FIGMA_ACCESS_TOKEN environment variable is not set');
-    }
+    const token = getFigmaToken(extra);
 
     // Fetch file data
     const fileResponse = await axios.get(`https://api.figma.com/v1/files/${fileKey}`, {
@@ -1220,27 +1210,27 @@ function createServer() {
     return { tools };
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: args } = request.params;
 
     try {
       switch (name) {
         case 'get_screenshot':
-          return await getScreenshot(args);
+          return await getScreenshot(args, extra);
         case 'get_metadata':
-          return await getMetadata(args);
+          return await getMetadata(args, extra);
         case 'fetch_all_assets_detailed':
-          return await fetchAllAssetsDetailed(args);
+          return await fetchAllAssetsDetailed(args, extra);
         case 'download_selective_assets':
-          return await downloadSelectiveAssets(args);
+          return await downloadSelectiveAssets(args, extra);
         case 'fetch_figma_assets':
-          return await fetchFigmaAssets(args);
+          return await fetchFigmaAssets(args, extra);
         case 'download_figma_assets':
-          return await downloadFigmaAssets(args);
+          return await downloadFigmaAssets(args, extra);
         case 'get_design_tokens':
-          return await getDesignTokens(args);
+          return await getDesignTokens(args, extra);
         case 'download_component_library':
-          return await downloadComponentLibrary(args);
+          return await downloadComponentLibrary(args, extra);
         default:
           throw new Error(`Unknown tool: ${name}`);
       }
@@ -1272,6 +1262,21 @@ if (useHttp) {
 
   const app = express();
   app.use(express.json());
+
+  // Middleware: extract Figma token from request header and attach as authInfo.
+  // The MCP SDK passes req.auth through to handlers as extra.authInfo.
+  // Clients send their Figma API key via the "x-figma-token" header.
+  app.use('/mcp', (req, _res, next) => {
+    const figmaToken = req.headers['x-figma-token'];
+    if (figmaToken) {
+      req.auth = {
+        token: figmaToken,
+        clientId: 'cursor-client',
+        scopes: []
+      };
+    }
+    next();
+  });
 
   // Map to store transports by session ID
   const transports = {};

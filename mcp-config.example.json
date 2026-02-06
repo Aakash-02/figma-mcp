@@ -9,8 +9,8 @@
     },
     "figma-asset-downloader-cloud": {
       "url": "https://your-cloud-url.example.com/mcp",
-      "env": {
-        "FIGMA_ACCESS_TOKEN": "your_figma_token_here"
+      "headers": {
+        "x-figma-token": "your_figma_token_here"
       }
     }
   }
